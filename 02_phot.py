@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
+from scipy.optimize import curve_fit
+
 from photutils.centroids import centroid_com, centroid_sources, centroid_2dg, centroid_com, centroid_quadratic
 from photutils.aperture import CircularAperture, CircularAnnulus, ApertureStats
 from photutils.aperture import aperture_photometry
@@ -23,12 +25,53 @@ import sys
 import warnings
 warnings.filterwarnings('ignore') 
 
+
+def simple_gaussian(x, mu, sig, noise_level, amplitude):
+    #
+    # Fit a simple Gaussian function to 1D data.
+    #
+    y = noise_level + amplitude*np.exp(-0.5*((mu-x)/sig)**2)
+    return(y)
+
+def get_fwhm_xy(data, xcenter, ycenter):
+    '''
+    Estimate the size of the FWHM of the PSF of a star centered at x,y within a given data image.
+    Return the average of the fwhm_x and fwhm_y values, print a warning if fwhm_x and fwhm_y are significantly different.
+    '''
+    width = 15 # Half the total range in x-coordinate to use when plotting and fitting a Gaussian
+
+    xrange = np.arange(ycenter-width, ycenter+width, 1)
+    xline = data[xcenter, ycenter-width:ycenter+width]
+    popt, pcov = curve_fit(simple_gaussian, xrange, xline, p0=(ycenter, 1, 1000, data[xcenter][ycenter]))
+    fwhm_x = popt[1]
+    fwhm_x_err = pcov[1][1]**0.5
+    # plt.scatter(xrange, xline, color='black')
+    # plt.plot(xrange, simple_gaussian(xrange, *popt), color='crimson', linewidth=0.5)
+    # plt.show()
+
+
+    yrange = np.arange(xcenter-width, xcenter+width, 1)
+    yline = data[xcenter-width:xcenter+width, ycenter]
+    popt, pcov = curve_fit(simple_gaussian, yrange, yline, p0=(xcenter, 1, 1000, data[xcenter][ycenter]))
+
+    fwhm_y = popt[1]
+    fwhm_y_err = pcov[1][1]**0.5
+    # plt.scatter(yrange, yline, color='black')
+    # plt.plot(yrange, simple_gaussian(yrange, *popt), color='crimson', linewidth=0.5)
+    # plt.show()
+
+    if fwhm_x/fwhm_y > 1.3 or fwhm_y/fwhm_x > 1.3:
+        # print(f"Ellipsoidal PSF:  FWHM_X={fwhm_x:.2f}  FWHM_Y={fwhm_y:.2f}")
+        fwhm_x = max([fwhm_x, fwhm_y])
+        fwhm_y = max([fwhm_x, fwhm_y])
+    return(fwhm_x, fwhm_x_err, fwhm_y, fwhm_y_err)
+
 def update_plot():
     '''
     Update the image plot with new markers.
     '''
     plt.cla()
-    ax.imshow(data, origin='upper', vmin=np.percentile(data, 0.25), vmax=np.percentile(data, 99.75))
+    ax.imshow(data, origin='upper', vmin=np.nanpercentile(data, 0.25), vmax=np.nanpercentile(data, 99.75))
     if len(x_init)>0:
         ax.scatter(x_init[0], y_init[0], marker='*', s=3*80, color="red", facecolor="None")
         ax.scatter(x_init[1:], y_init[1:], marker='+', s=80, color="red")
@@ -95,14 +138,14 @@ def get_bkg(data):
         # Plot the image
         fig = plt.figure(figsize=(6,6))
         ax = fig.add_subplot(111)
-        ax.imshow(data, origin='upper', vmin=np.percentile(data, 0.25), vmax=np.percentile(data, 99.75))
+        ax.imshow(data, origin='upper', vmin=np.nanpercentile(data, 0.25), vmax=np.nanpercentile(data, 99.75))
         plt.show()
 
         # Plot the image with the source regions cut out
         data2 = data*~mask
         fig = plt.figure(figsize=(6,6))
         ax = fig.add_subplot(111)
-        ax.imshow(data2, origin='upper', vmin=np.percentile(data, 0.25), vmax=np.percentile(data, 99.75))
+        ax.imshow(data2, origin='upper', vmin=np.nanpercentile(data, 0.25), vmax=np.nanpercentile(data, 99.75))
         plt.show()
 
         # Plot the estimated background image
@@ -121,7 +164,7 @@ def show_centroid(xcenter, ycenter):
     fig = plt.figure(figsize=(6,6))
     ax = fig.add_subplot(111)
 
-    ax.imshow(data, origin='upper', vmin=np.percentile(data, 0.25), vmax=np.percentile(data, 99.75))
+    ax.imshow(data, origin='upper', vmin=np.nanpercentile(data, 0.25), vmax=np.nanpercentile(data, 99.75))
     ax.scatter(xcenter[0], ycenter[0], marker='*', s=3*80, color="red", label="Centroids", facecolor="None")
     ax.scatter(xcenter[1:], ycenter[1:], marker='x', s=80, color="red", label="Centroids")
     plt.tight_layout()
@@ -134,55 +177,18 @@ def get_centroid(x_init, y_init, box=11):
     x, y = centroid_sources(data, x_init, y_init, box_size=box, centroid_func=centroid_2dg)
     return(x, y)
 
-if __name__ == "__main__":
-    #
-    #  
-    #
-    global data
-    global ax
 
-    # Create list of image files
-    path = "./"
-    files = [path+k for k in os.listdir(path) if k[-5:]==".fits" and "._" not in k]
-
-    # Obtain CCD parameters
-    filename = np.random.choice(sorted(files[0:10]))
-    file = fits.open(filename)
-    try:
-        data = file[0].data
-        assert len(data.shape) == 2
-    except AssertionError:
-        data = file[0].data[0]
-        assert len(data.shape) == 2, "Data must be 2-dimensional"
-
-    header = file[0].header
-    gain = header.get("gain", 1.0) # Use gain=1.0 if header value is not found.
-
-    # Display the data in the first image. Click the image to select stars for photometry.
-    x_init = []
-    y_init = []
-
-    fig = plt.figure(figsize=(6,6))
-    ax = fig.add_subplot(111)
-    ax.imshow(data, origin='upper', vmin=np.percentile(data, 0.25), vmax=np.percentile(data, 99.75))
-    plt.connect('button_press_event', on_click)
-    plt.tight_layout()
-    plt.show()
-
-    xcenter, ycenter = get_centroid(x_init, y_init, 11)
-    # show_centroid(xcenter, ycenter)
-
+def build_df(files, xcenter, ycenter, aperture_radius):
     df = pd.DataFrame({})
 
-    n_centroid = 30 # Re-centroid every n_centroid images
+    n_centroid = 3 # Re-centroid every n_centroid images
     for i,filename in enumerate(sorted(files)):
         #
         # Use astropy for photometry of each source.
         # Aperture size fixed for now, but later based on average PSF
         #
-        if i%10 == 0:
-            print(filename)
-        aperture_r = 12.0
+        # if i%10 == 0:
+        #     print(filename)
 
         # Read in each data file individually
         file = fits.open(filename)
@@ -198,6 +204,22 @@ if __name__ == "__main__":
                 centers = [(k,l) for k,l in zip(xcenter, ycenter)]
             except ValueError:
                 continue
+
+        fwhm_apertures = False # Calculate average FWHM across calibration stars to use as aperture extraction radius (different for each image)?
+        if fwhm_apertures:
+            fwhm_x = []
+            fwhm_y = []
+            fwhm_all = []
+            for center in centers:
+                fwhm_xy = get_fwhm_xy(data, int(center[1]), int(center[0]))
+                fwhm_x.append(fwhm_xy[0]+3*fwhm_xy[1])
+                fwhm_y.append(fwhm_xy[2]+3*fwhm_xy[3])
+                fwhm_all.append(fwhm_xy[0]+3*fwhm_xy[1])
+                fwhm_all.append(fwhm_xy[2]+3*fwhm_xy[3])
+            # print(len(fwhm_x), np.average(fwhm_x), np.average(fwhm_y), np.average(fwhm_all))
+            aperture_r = int(4*np.average(fwhm_all))
+        else:
+            aperture_r = aperture_radius # If not calculating FWHM, then use constant aperture size.
 
         # Create circular source apertures located at each centroid.
         src_apertures = CircularAperture([k for k in centers], r=aperture_r)
@@ -221,7 +243,8 @@ if __name__ == "__main__":
             continue
 
         phot_table = aperture_photometry(data-bkg_image, src_apertures, error=error)
-        phot_table["bjd_tdb"] = file[0].header["BJD_TDB"]
+#        phot_table["bjd_tdb"] = file[0].header["BJD_TDB"]
+        phot_table["bjd_tdb"] = file[0].header["JD"]
         df = pd.concat((df, phot_table.to_pandas()))
 
     # Scale each of the light curves to their median values.
@@ -238,6 +261,19 @@ if __name__ == "__main__":
     weighted, weighted_error = np.average(fluxes, axis=0, weights=weights, returned=True)
     weighted_error = weighted_error**-0.5
 
+    airmass_correction = False # Disable airmass correction for now.
+    if airmass_correction:
+        fig = plt.figure(figsize=(11,6))
+        ax = fig.add_subplot(111)
+        print(df.head())
+        ax.errorbar(df[df["id"]==1]["bjd_tdb"], weighted, yerr=weighted_error, color='black', marker=".", markersize=3, elinewidth=0.5, capsize=1, linestyle='None', alpha=0.8)
+        ax.set_xlabel("BJD_TDB (days)", fontsize="large")
+        ax.set_ylabel("Relative Flux", fontsize="large")
+        plt.grid(visible=True,which='both',linestyle="--", alpha=0.5, color='grey', linewidth=0.5)
+        plt.show()
+
+    
+
     time = df[df["id"]==1]["bjd_tdb"].values
     df.insert(6, "rel_flux", 1.0)
     df.insert(7, "rel_flux_err", 1.0)
@@ -252,24 +288,103 @@ if __name__ == "__main__":
     # Save the data to a CSV file. Keep only the best quality data based on the errorbars.
 
     df_clean = df[(df["id"]==1) &
-                    (df["rel_flux_err"] < np.percentile(df[df["id"]==1]["rel_flux_err"],95)) &
+                    (df["rel_flux_err"] < np.nanpercentile(df[df["id"]==1]["rel_flux_err"],99)) &
                     (df["rel_flux_err"]<0.075)][["bjd_tdb","rel_flux","rel_flux_err"]]
 
-    ofilename = "output_lc.csv"
-    df_clean.to_csv(ofilename,index=False)
+    print(df.describe())
+    return(df_clean)
 
-    fig = plt.figure(figsize=(10,5))
+if __name__ == "__main__":
+    #
+    #  
+    #
+    global data
+    global ax
+
+    color = sys.argv[1]
+
+    # Create list of image files
+    path = "./science/"
+    files = [path+k for k in os.listdir(path) if k[-6:]==f"{color}.fits" and "._" not in k]
+
+    # Obtain CCD parameters
+    filename = np.random.choice(sorted(files[0:10]))
+    file = fits.open(filename)
+    try:
+        data = file[0].data
+        assert len(data.shape) == 2
+    except AssertionError:
+        data = file[0].data[0]
+        assert len(data.shape) == 2, "Data must be 2-dimensional"
+
+    header = file[0].header
+    gain = header.get("gain", 1.0) # Use gain=1.0 if header value is not found.
+
+    # Display the data in the first image. Click the image to select stars for photometry.
+    x_init = []
+    y_init = []
+
+    fig = plt.figure(figsize=(6,6))
     ax = fig.add_subplot(111)
-
-    ax2 = ax.secondary_xaxis('top',functions=(lambda x: 24*(x-min(df_clean['bjd_tdb'].values)), lambda x: x/24+min(df_clean['bjd_tdb'].values)))
-    ax2.set_xlabel('Time (hours)', fontsize='large')
-
-    ax.errorbar(df_clean["bjd_tdb"], df_clean["rel_flux"], yerr=df_clean["rel_flux_err"], color='black', marker=".", markersize=3, elinewidth=0.5, capsize=1, linestyle='None', alpha=0.8)
-    ax.set_xlabel("BJD_TDB (days)", fontsize="large")
-    ax.set_ylabel("Relative Flux", fontsize="large")
-    plt.grid(visible=True,which='both',linestyle="--", alpha=0.5, color='grey', linewidth=0.5)
-    plt.savefig("output_lc.jpg", dpi=100)
+    ax.imshow(data, origin='upper', vmin=np.nanpercentile(data, 0.25), vmax=np.nanpercentile(data, 99.75))
+    plt.connect('button_press_event', on_click)
+    plt.tight_layout()
     plt.show()
+
+    xcenter, ycenter = get_centroid(x_init, y_init, 11)
+    # show_centroid(xcenter, ycenter)
+
+    find_best_aperture = False # Try to the "best" aperture size
+    if find_best_aperture:
+        aperture_list = np.arange(10, 30, 1)
+        flux_spread = []
+        flux_errorbar = []
+        files_sample = np.random.choice(files, int(0.2*len(files)))
+        for aperture_radius in aperture_list:
+            df_clean = build_df(files_sample, xcenter, ycenter, aperture_radius)
+            flux_spread.append(np.std(df_clean["rel_flux"]))
+            flux_errorbar.append(np.median(df_clean["rel_flux_err"]))
+
+        fig = plt.figure(figsize=(11,5))
+        ax1 = fig.add_subplot(121)
+        ax1.scatter(aperture_list, flux_spread)
+        ax1.set_title("Spread in calibrated LC flux")
+        ax1.set_ylabel("Spread in Rel. Flux")
+        ax1.set_xlabel("Aperture Radius")
+
+        ax1 = fig.add_subplot(122)
+        ax1.scatter(aperture_list, flux_errorbar)
+        ax1.set_title("Rel. Flux Median Errorbar in calibrated LC flux")
+        ax1.set_ylabel("Rel. Flux Median Errorbar")
+        ax1.set_xlabel("Aperture Radius")
+        plt.show()
+
+    else: # Assume fixed aperture size for all images.
+        aperture_radius = 12 # Pixel radius
+        df_clean, = build_df(files, xcenter, ycenter, aperture_radius)
+        ofilename = f"output_lc_{color}.csv"
+        df_clean.to_csv(ofilename,index=False)
+        
+        fig = plt.figure(figsize=(10,5))
+        ax = fig.add_subplot(111)
+
+        ax2 = ax.secondary_xaxis('top',functions=(lambda x: 24*(x-min(df_clean['bjd_tdb'].values)), lambda x: x/24+min(df_clean['bjd_tdb'].values)))
+        ax2.set_xlabel('Time (hours)', fontsize='large')
+
+        ax.errorbar(df_clean["bjd_tdb"], df_clean["rel_flux"], yerr=df_clean["rel_flux_err"], color='black', marker=".", markersize=3, elinewidth=0.5, capsize=1, linestyle='None', alpha=0.8)
+        ax.set_xlabel("BJD_TDB (days)", fontsize="large")
+        ax.set_ylabel("Relative Flux", fontsize="large")
+        plt.grid(visible=True,which='both',linestyle="--", alpha=0.5, color='grey', linewidth=0.5)
+        plt.savefig(f"output_lc_{color}.jpg", dpi=100)
+        plt.show()
+
+
+
+
+
+
+
+
 
 
     # TODO: Airmass correction using a similar-colored non-variable star in the field as the main object of interest.
@@ -288,7 +403,7 @@ if __name__ == "__main__":
     #     weighted_error = weighted_error[ind]
     #     time2 = time2[ind]
 
-    # order = 7
+    # order = 3
     # # Fit a polynomial to this light curve.
     # polfit = np.polyfit(x=time2, y=weighted, w=1/weighted_error, deg=order, rcond=None, full=False)
     # fit = np.zeros_like(time)
